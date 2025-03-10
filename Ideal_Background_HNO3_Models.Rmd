@@ -1,0 +1,813 @@
+---
+title: "Analysis of ICP-MS data to predict ideal or noise-limited background cps @ m/z"
+author: "Roy W. Martin"
+date: "`r Sys.Date()`"
+output:
+  github_document:
+    number_sections: TRUE
+    df_print: "tibble"
+    math_method: 
+      engine: webtex
+    #  url: https://latex.codecogs.com/svg.image?
+    html_preview: TRUE
+    keep_html: TRUE
+bibliography: references.bib
+link-citations: yes
+editor_options:
+  chunk_output_type: inline
+  markdown: 
+    wrap: 72
+---
+
+
+This is an RMarkdown documentation of a modeling workflow for fully Bayesian analysis of ICP-MS observations to characterize the noise-limited or Ideal Background-Instrument Detection Limit (IB-IDL) of instrumentation. The analysis below is based on observations from a 7-day experiment conducted in a USEPA/ORD/CESER (Center for Environmental Solutions and Emergency Response - Cincinnati) laboratory. The observation-level data were measured counts per second (CPS) recorded for individual "burns" at specified m/z for samples from 3 different $HNO_3$ 0.8% solutions measured over a 7 day period. These original data were recorded to an MS Excel file, which was imported, modified, and organized into a data frame object within R for use in modeling in another script called "Import_ICPMS.Rmd" located at https://github.com/r-w-martin/ICPMS_7d_Exp. 
+
+This workflow uses the $\textbf{brms}$ package [@Burkner_2017] in $\textbf{R}$ as an interface to $\textbf{Stan}$ [@Carpenter_etal_2017] for fitting fully Bayesian models. It used the $\textbf{loo}$ package to compare six potential models via Bayesian leave-one-out cross validation ('LOO-CV') [@Vehtari_etal_2019] and to decide on a final model for inference. Other packages used are listed in the "setup" chunk of this .Rmd code file and the "Session Info" section at the end of the resulting .md document lists the versions of these packages used in the most recent "knit".
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(include = FALSE)
+library(readxl)
+library(ggpubr)
+library(moments)
+library(ggplot2)
+library(ggExtra)
+library(gridExtra)
+library(kableExtra)
+library(ggrepel)
+library(future)
+library(foreach)
+library(itertools)
+library(tidyverse)
+library(bayesplot)
+library(tidybayes)
+library(colorspace)
+library(brms)
+
+options(mc.cores = parallel::detectCores(logical = FALSE))
+options( max.print = 1000 )
+
+# Load model and data files for knitting (if they already exist)
+## List of object names
+objs <- c("df_cleaned",
+          "df_hno3",
+          "df_analyte",
+          "df_daily",
+          "df_hno3_avg",
+          "df_analyte_avg",
+          "df_daily_avg",
+          "hno3_mod1",
+          "hno3_mod2",
+          "hno3_mod3",
+          "hno3_mod4",
+          "hno3_mod5",
+          "hno3_mod6",
+          "df_X",
+          "pred_X",
+          "pred_X_avg",
+          "df_observed_avg"
+          )
+
+N <- length(objs)
+f <- list()
+for(i in 1:N){
+    f[i] <- paste0("./model_files/",
+    objs[i], ".rda")
+    }
+
+for(i in 1:N){
+  if(file.exists(f[[i]]))
+    load(f[[i]])
+}
+
+rm(f, i, objs, N)
+```
+
+
+# Data
+Load cleaned data generated from code to import original data. (see: "Import_ICPMS.Rmd" @ https://github.com/r-w-martin/ICPMS_7d_Exp)
+```{r load_all_data}
+load("./model_files/df_cleaned.rda")
+```
+
+Munge a data frame of ideal background m/z only.
+```{r subset_HNO3_data}
+df_hno3 <- df_cleaned %>%
+  filter(description %in% c("0.8% HNO3 A", "0.8% HNO3 B", "0.8% HNO3 C"),
+         mass %in% c(6.5, 22.5, 23.5, 44.5, 58.5, 59.5, 62.5, 63.5, 65.5, 66.5, 69.5, 
+                     70.5, 71.5, 72.5, 73.5, 74.5, 76.5, 77.5, 78.5, 81.5, 83.5, 91.5,
+                     92.5, 99.5, 115.5, 120.5, 122.5, 139.5, 140.5, 141.5, 143.5, 144.5,
+                     146.5, 147.5, 148.5, 151.5, 152.5, 159.5, 160.5, 204.5, 205.5, 212:229,
+                     232.5))
+
+#save(df_hno3, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_hno3.rda")
+
+df_hno3 %>% print()
+```
+
+
+Create data frame of analyte m/z only.
+```{r subset_HNO3_data_2}
+df_analyte <- df_cleaned %>%
+  filter(description %in% c("0.8% HNO3 A", "0.8% HNO3 B", "0.8% HNO3 C"),
+         mass %in% c(9, 27, 51, 52, 55, 59, 60, 63, 66, 75, 78, 98, 
+                     107, 111, 123, 137, 143, 145, 147, 149, 150, 
+                     155, 157, 205, 206, 232, 238))
+
+#save(df_analyte, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_analyte.rda")
+
+df_analyte %>% print()
+```
+
+
+Create data frame of daily m/z only.
+```{r subset_HNO3_data_3}
+df_daily <- df_cleaned %>%
+  filter(description %in% c("Daily Solution New Na with 100ppb Er 5% HCL"),
+         mass %in% c(51, 53, 75, 76, 77, 78, 156, 157, 248, 249))
+
+#save(df_daily, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_daily.rda")
+
+df_daily %>% print()
+```
+
+
+# Exploratory plots
+First, plot log(CPS) @ m/z with estimated trend by day.
+```{r plot_data, fig.align = "center", fig.asp= 0.5, fig.width=6}
+df_hno3 %>%
+  filter(cps > 0) %>%
+  ggplot(aes(x = mass, y = log(cps), color = factor(day))) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  xlab("mass") +
+  ylab("log(cps)")
+```
+
+Plot log(CPS) @ m/z with estimated trend by burn.
+```{r plot_data_2, fig.align = "center", fig.asp= 0.5, fig.width=6}
+df_hno3 %>%
+  filter(cps > 0) %>%
+  ggplot(aes(x = mass, y = log(cps), color = factor(burn))) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  xlab("mass") +
+  ylab("log(cps)")
+```
+
+Plot log(CPS) @ m/z with estimated trend by day and sample order.
+```{r plot_data_3, fig.align = "center", fig.asp= 1, fig.width=8}
+df_hno3 %>%
+  filter(cps > 0) %>%
+  ggplot(aes(x = mass, y = log(cps), color = factor(sample_order))) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  facet_wrap(~day) +
+  xlab("mass") +
+  ylab("log(cps)")
+```
+
+Plot log(CPS) @ m/z with estimated trend by sample order, day, and burn.
+```{r plot_data_4, fig.align = "center", fig.asp= 2, fig.width=8}
+df_hno3 %>%
+  filter(cps > 0) %>%
+  ggplot(aes(x = mass, y = log(cps), color = factor(sample_order))) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  facet_wrap(~ day + burn, ncol = 3) +
+  xlab("mass") +
+  ylab("log(cps)")
+```
+
+
+# Model fitting
+
+## Model 1
+A hierarchical/multilevel model with a Poisson likelihood for observed CPS (level-1) modeled as a function of nested random effects for individual burns (level-2) within HNO3 samples (level-3, i.e., "description") within days (level-4).
+```{r mod1, eval=FALSE, include=TRUE}
+bf_mod1 <- bf(cps ~ 1 +
+                mass +
+                (1 | day) +
+                (1 | day:description) + 
+                (1 | day:description:burn),
+              family = poisson())
+
+priors1 <- c(
+  prior(normal(0, 3), class = "Intercept"),
+  prior(normal(0, 0.1), class = "b"),
+  prior(exponential(1), class = "sd")
+  )
+
+hno3_mod1 <- brm(bf_mod1,
+                data = df_hno3,
+                prior = priors1,
+                #control = list(adapt_delta = 0.99, max_treedepth = 14),
+                #sample_prior = "only",
+                save_pars = save_pars(all = TRUE),
+                seed = 145,
+                chains=4, 
+                iter=2000, 
+                cores=4)
+
+save(hno3_mod1, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/hno3_mod1.rda")
+```
+
+
+```{r summary_mod1}
+print(hno3_mod1, digits = 3, priors = TRUE)
+```
+
+Check observed counts ($y$) vs. average of posterior predictive distribution of counts ($y_{rep}$)
+```{r check1, fig.align='center', fig.asp=0.75, fig.width=4}
+pp_check(hno3_mod1, type = "bars", ndraws = 400)
+```
+
+Check observed proportion of zeros in the dataset ($y$) vs. predicted proportion of zeros in replicated datasets ($y_{rep}$, i.e., posterior predictive distribution of zeros).
+```{r check1b, fig.align='center', fig.asp=0.75, fig.width=4}
+prop_zero <- function(x) mean(x == 0)
+
+pp_check(hno3_mod1, type = "stat", stat = prop_zero)
+```
+
+## Model 2
+A hierarchical model with a negative binomial likelihood.
+```{r mod2, eval=FALSE, include=TRUE}
+bf_mod2 <- bf(cps ~ 1 + 
+               mass +
+               (1 | day) + 
+               (1 | day:description) + 
+               (1 | day:description:burn),
+             family = negbinomial())
+
+priors2 <- c(
+  prior(normal(0, 3), class = "Intercept"),
+  prior(normal(0, 0.1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(gamma(0.01, 0.01), "shape")
+  )
+
+hno3_mod2 <- brm(bf_mod2,
+                data = df_hno3,
+                prior = priors2,
+                #control = list(adapt_delta = 0.99, max_treedepth = 14),
+                #sample_prior = "only",
+                save_pars = save_pars(all = TRUE),
+                seed = 546,
+                chains=4, 
+                iter=2000, 
+                cores=4)
+
+save(hno3_mod2, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/hno3_mod2.rda")
+```
+
+```{r summary_mod2}
+print(hno3_mod2, digits = 3, priors = TRUE)
+```
+
+```{r check2, fig.align='center', fig.asp=0.75, fig.width=4}
+pp_check(hno3_mod2, type = "bars", ndraws = 400)
+```
+
+```{r check2b, fig.align='center', fig.asp=0.75, fig.width=4}
+prop_zero <- function(x) mean(x == 0)
+
+pp_check(hno3_mod2, type = "stat", stat = prop_zero)
+```
+
+## Model 3
+A hierarchical model with a zero-inflated negative binomial likelihood.
+```{r mod3, eval=FALSE, include=TRUE}
+bf_mod3 <- bf(cps ~ 1 + 
+               mass +
+               (1 | day) + 
+               (1 | day:description) + 
+               (1 | day:description:burn),
+             family = zero_inflated_negbinomial())
+
+priors3 <- c(
+  prior(normal(0, 3), class = "Intercept"),
+  prior(normal(0, 0.1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(gamma(0.01, 0.01), "shape"),
+  prior(beta(1, 1), "zi")
+  )
+
+hno3_mod3 <- brm(bf_mod3,
+                data = df_hno3,
+                prior = priors3,
+                #control = list(adapt_delta = 0.99, max_treedepth = 14),
+                #sample_prior = "only",
+                save_pars = save_pars(all = TRUE),
+                seed = 65132,
+                chains=4, 
+                iter=2000, 
+                cores=4)
+
+save(hno3_mod3, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/hno3_mod3.rda")
+```
+
+```{r summary_mod3}
+print(hno3_mod3, digits = 3, priors = TRUE)
+```
+
+```{r check3, fig.align='center', fig.asp=0.75, fig.width=4}
+pp_check(hno3_mod3, type = "bars", ndraws = 400)
+```
+
+```{r check3b, fig.align='center', fig.asp=0.75, fig.width=4}
+prop_zero <- function(x) mean(x == 0)
+
+pp_check(hno3_mod3, type = "stat", stat = prop_zero)
+```
+
+## Model 4
+A hierarchical model with a negative binomial likelihood and allowing the m/z effect to vary according to groupings.
+```{r mod4, eval=FALSE, include=TRUE}
+bf_mod4 <- bf(cps ~ 1 + 
+               mass +
+               (mass | day) + 
+               (mass | day:description) + 
+               (mass | day:description:burn),
+             family = zero_inflated_negbinomial())
+
+priors4 <- c(
+  prior(normal(0, 3), class = "Intercept"),
+  prior(normal(0, 0.1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(beta(1, 1), "zi")
+  )
+
+hno3_mod4 <- brm(bf_mod4,
+                data = df_hno3,
+                prior = priors4,
+                #control = list(adapt_delta = 0.99, max_treedepth = 14),
+                #sample_prior = "only",
+                save_pars = save_pars(all = TRUE),
+                seed = 3256,
+                chains=4, 
+                iter=2000, 
+                cores=4)
+
+save(hno3_mod4, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/hno3_mod4.rda")
+```
+
+```{r summary_mod4}
+print(hno3_mod4, digits = 3, priors = TRUE)
+```
+
+
+```{r check4, fig.align='center', fig.asp=0.75, fig.width=4}
+pp_check(hno3_mod4, type = "bars", ndraws = 400)
+```
+
+```{r check4b, fig.align='center', fig.asp=0.75, fig.width=4}
+prop_zero <- function(x) mean(x == 0)
+
+pp_check(hno3_mod4, type = "stat", stat = prop_zero)
+```
+
+## Model 5
+A hierarchical model with a zero-inflated negative binomial likelihood and modeling the distributional term (shape = $\phi$) as a function of m/z.
+```{r mod5, eval=FALSE, include=TRUE}
+bf_mod5 <- bf(cps ~ 1 + 
+               mass +
+               (1 | day) + 
+               (1 | day:description) + 
+               (1 | day:description:burn),
+             family = zero_inflated_negbinomial(),
+             shape ~ mass)
+
+priors5 <- c(
+  prior(normal(0, 3), class = "Intercept"),
+  prior(normal(0, 0.1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(normal(0, 2), class = "Intercept", dpar = "shape"),
+  prior(normal(0, 0.02), class = "b", dpar = "shape"),
+  prior(beta(1, 1), "zi")
+  )
+
+hno3_mod5 <- brm(bf_mod5,
+                data = df_hno3,
+                prior = priors5,
+                #control = list(adapt_delta = 0.99, max_treedepth = 14),
+                #sample_prior = "only",
+                save_pars = save_pars(all = TRUE),
+                seed = 56112,
+                chains=4, 
+                iter=2000, 
+                cores=4)
+
+save(hno3_mod5, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/hno3_mod5.rda")
+```
+
+```{r summary_mod5}
+print(hno3_mod5, digits = 3, priors = TRUE)
+```
+
+```{r check5, fig.align='center', fig.asp=0.75, fig.width=4}
+pp_check(hno3_mod5, type = "bars", ndraws = 400)
+```
+
+```{r check5b, fig.align='center', fig.asp=0.75, fig.width=4}
+prop_zero <- function(x) mean(x == 0)
+
+pp_check(hno3_mod5, type = "stat", stat = prop_zero)
+```
+
+## Model 6
+A hierarchical model with a zero-inflated negative binomial likelihood and modeling the distributional term (shape = $\phi$) as a function of m/z. Also included a m/z effect on the zero inflation term.
+```{r mod6, eval=FALSE, include=TRUE}
+bf_mod6 <- bf(cps ~ 1 +
+               mass +
+               (1 | day) + 
+               (1 | day:description) + 
+               (1 | day:description:burn),
+             family = zero_inflated_negbinomial(),
+             shape ~ mass,
+             zi ~ mass)
+
+priors6 <- c(
+  prior(normal(0, 3), class = "Intercept"),
+  prior(normal(0, 0.1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(normal(0, 2), class = "Intercept", dpar = "shape"),
+  prior(normal(0, 0.02), class = "b", dpar = "shape"),
+  prior(normal(0, 5), class = "Intercept", dpar = "zi"),
+  prior(normal(0, 3), class = "b", dpar = "zi")
+  )
+
+hno3_mod6 <- brm(bf_mod6,
+                data = df_hno3,
+                prior = priors6,
+                #control = list(adapt_delta = 0.99, max_treedepth = 14),
+                #sample_prior = "only",
+                save_pars = save_pars(all = TRUE),
+                seed = 3213,
+                chains=4, 
+                iter=3000, 
+                cores=4)
+
+save(hno3_mod6, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/hno3_mod6.rda")
+```
+
+```{r summary_mod6}
+print(hno3_mod6, digits = 3, priors = TRUE)
+```
+
+```{r check6, fig.align='center', fig.asp=0.75, fig.width=4}
+pp_check(hno3_mod6, type = "bars", ndraws = 1000)
+```
+
+```{r check6b, fig.align='center', fig.asp=0.75, fig.width=4}
+prop_zero <- function(x) mean(x == 0)
+
+pp_check(hno3_mod6, type = "stat", stat = prop_zero)
+```
+
+```{r check6c, fig.align='center', fig.asp=0.75, fig.width=5}
+pp_check(hno3_mod6, type = "scatter_avg", ndraws = 200) 
+```
+
+Plot the fitted intercept and slope parameters for the count component of the model.
+```{r plot_params6_a, fig.align='center', fig.asp=0.75, fig.width=4}
+hno3_mod6 %>%
+  gather_draws(b_mass) %>%
+  ggplot(aes(y = .variable, x = .value)) +
+  stat_halfeye() +
+  xlab("") +
+  ylab("") +
+  ggtitle("Estimated effect of mass on count \n component of the model")
+```
+
+Plot the fitted intercept and slope parameters for the zero-inflation component of the model.
+```{r plot_params6_b, fig.align='center', fig.asp=0.75, fig.width=4}
+hno3_mod6 %>%
+  gather_draws(b_zi_mass) %>%
+  ggplot(aes(y = .variable, x = .value)) +
+  stat_halfeye() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Estimated effect of mass on \n zero-inflation component \n of the model")
+```
+
+
+Plot the estimated effect of m/z on the shape paramete of the count model.
+```{r plot_params6_c, fig.align='center', fig.asp=0.75, fig.width=4}
+hno3_mod6 %>%
+  gather_draws(b_shape_mass) %>%
+  ggplot(aes(y = .variable, x = .value)) +
+  stat_halfeye() +
+  xlab("") +
+  ylab("") +
+  ggtitle("Estimated effect of mass on \n shape component of \n the count model")
+```
+
+Plot the estimated scale parameters for the hierarchical effects.
+```{r plot_params6_d, fig.align='center', fig.asp=0.75, fig.width=5}
+hno3_mod6 %>%
+  gather_draws(sd_day__Intercept, `sd_day:description__Intercept`, `sd_day:description:burn__Intercept`) %>%
+  ggplot(aes(y = .variable, x = .value)) +
+  stat_halfeye() +
+  xlab("") +
+  ylab("") +
+  ggtitle("Estimated scale parameters \n for hierarchical effects")
+```
+
+
+Plot the estimated hierarchical effects (as differences from the overall mean) for sample replicates within days.
+```{r plot_params6_e, fig.align='center', fig.asp=1, fig.width=5}
+hno3_mod6 %>%
+  gather_draws(`r_day:description`[label, ]) %>%
+  ggplot(aes(y = label, x = .value)) +
+  stat_pointinterval() +
+  xlab("") +
+  ylab("") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  ggtitle("Estimated effects for sample replicates") 
+```
+
+Plot the estimated hierarchical effects (centered over zero) for days 1 to 7.
+```{r plot_params6_f, fig.align='center', fig.asp=1.5, fig.width=5}
+hno3_mod6 %>%
+  gather_draws(`r_day:description:burn`[day, ]) %>%
+  ggplot(aes(y = day, x = .value)) +
+  stat_pointinterval() +
+  xlab("") +
+  ylab("") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  ggtitle("Estimated effects for burn replicates \n within samples across days") 
+```
+
+Plot conditional effect of m/z on cps
+```{r cond_effects_predict6, fig.align='center', fig.asp=0.75, fig.width=5}
+plot(conditional_effects(hno3_mod6), points = TRUE)
+```
+
+
+Plot the estimated conditional effect of m/z on the variation in counts at the observation level (shape parameter). Note: as shape increases, variation decreases.
+```{r cond_effects_predict6_2, fig.align='center', fig.asp=0.75, fig.width=5}
+plot(conditional_effects(hno3_mod6, dpar = "shape"))
+```
+
+
+Plot the estimated conditional effect of m/z on the rate of zero's observed. Note: as $z_i$ increases, the probability of a zero increases.
+```{r cond_effects_predict6_3, fig.align='center', fig.asp=0.75, fig.width=5}
+plot(conditional_effects(hno3_mod6, dpar = "zi"))
+```
+
+
+# Compare models
+Compare models 6 and 7 with loo.
+```{r loo}
+loo5 <- brms::loo(hno3_mod5)
+loo6 <- brms::loo(hno3_mod6)
+
+loo_compare_5_6 <- brms::loo_compare(loo5, loo6)
+```
+
+```{r loo_compare_result}
+print(loo_compare_5_6)
+```
+
+# Predict to mass
+Make a data frame with hypothetical mass, day, burn, and sample type ("descr") to predict to
+```{r assemble_X}
+df_X <- tibble(mass = seq(6, 249, 0.5), day = 8, burn = 1, description = "HNO3")
+print(df_X)
+
+#save(df_X, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_X.rda")
+```
+
+Predict to the hypothetical data.
+```{r predict_X}
+pred_X <- df_X %>%
+  add_predicted_draws(hno3_mod6, allow_new_levels = TRUE)
+
+print(pred_X)
+
+#save(pred_X, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/pred_X.rda")
+```
+
+Summarize the cps predictions (median, quantiles) by m/z.
+```{r summary_predict_X}
+pred_X %>%
+  group_by(mass) %>%
+  median_qi(.prediction) %>%
+  select(mass, .prediction, .lower, .upper) %>%
+  rename(posterior_median = .prediction,
+         lower_95_CI = .lower,
+         upper_95_CI = .upper)
+```
+
+Plot the predictions and data used to fit the Ideal Background model.
+```{r plot_predict_X_1, fig.align='center', fig.asp=0.75, fig.width=6}
+pred_X %>%
+  ggplot(aes(x = mass, y = .prediction)) +
+  stat_lineribbon(.width = c(0.99, 0.75, 0.5)) + 
+  scale_fill_brewer(palette = "YlOrRd") +
+  geom_point(data = df_hno3, aes(x = mass, y = cps)) +
+  ylab("CPS") +
+  xlab("mass") +
+  ggtitle("Predicted Ideal Background and \n Observed CPS @ m/z in HNO3 0.8%") +
+  scale_y_continuous(minor_breaks = seq(0, 20, 1)) +
+  theme_pubr() +
+  theme(legend.position = "right", legend.direction = "vertical")
+```
+
+Export and xlsx file with the above predictions.
+```{r summary_predict_X_export, eval=FALSE, include=TRUE}
+pred_X %>%
+  group_by(mass) %>%
+  median_qi(.prediction, .width = 0.99) %>%
+  select(mass, .prediction, .lower, .upper) %>%
+  rename(posterior_median = .prediction,
+         lower_99_CI = .lower,
+         upper_99_CI = .upper) %>%
+  write_csv(file = "prediction_interval_summary.csv")
+```
+
+Plot prediction of ideal background noise vs. analyte observations in HNO3 0.8%.
+```{r plot_predict_X_2, fig.align='center', fig.asp=0.75, fig.width=6}
+pred_X %>%
+  ggplot(aes(x = mass, y = .prediction)) +
+  stat_lineribbon(.width = c(0.99, 0.75, 0.5)) + 
+  scale_fill_brewer(palette = "YlOrRd") +
+  geom_point(data = df_analyte, aes(x = mass, y = cps), shape = 1) +
+  geom_point(data = df_hno3, aes(x = mass, y = cps)) +
+  ylab("CPS") +
+  xlab("mass") +
+  ggtitle("Analyte CPS and Predicted Ideal Background CPS @ m/z \n in HNO3 0.8% (note y-axis truncated to preserve \n scale at lower CPS)") +
+  theme_pubr() +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  ylim(0, 75)
+```
+
+Plot prediction of ideal background noise vs. interference m/z in daily solution.
+```{r plot_predict_X_3, fig.align='center', fig.asp=0.75, fig.width=6}
+pred_X %>%
+  ggplot(aes(x = mass, y = .prediction)) +
+  stat_lineribbon(.width = c(0.99, 0.75, 0.5)) + 
+  scale_fill_brewer(palette = "YlOrRd") +
+  geom_point(data = df_daily, aes(x = mass, y = cps, color = factor(mass))) +
+  ylab("CPS") +
+  xlab("mass") +
+  ggtitle("Observed Daily Solution CPS @ m/z \n and Predicted Ideal Background CPS") +
+  theme_pubr() +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  ylim(0, 100)
+```
+
+# Predict avg of 3 burns at m/z
+Make a data frame again, but this time with 3 burns, in order to take their average.
+```{r assemble_X_2}
+df_X_avg <- tibble(expand.grid(mass = seq(6, 249, 0.5), day = 8, burn = 1:3, description = "HNO3"))
+print(df_X_avg)
+
+#save(df_X_avg, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_X_avg.rda")
+```
+
+Predict to the hypothetical data.
+```{r predict_X_5}
+pred_X_avg <- df_X_avg %>%
+  add_predicted_draws(hno3_mod6, allow_new_levels = TRUE) %>%
+  group_by(mass, .draw) %>%
+  summarize(avg_CPS = mean(.prediction))
+
+print(pred_X_avg)
+
+#save(pred_X_avg, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/pred_X_avg.rda")
+```
+
+Export an xlsx file summarizing the above average CPS predictions across m/z.
+```{r summary_predict_X_export_2, eval=FALSE, include=TRUE}
+pred_X_avg %>%
+  group_by(mass) %>%
+  median_qi(avg_CPS, .width = 0.99) %>%
+  select(mass, avg_CPS, .lower, .upper) %>%
+  rename(posterior_median = avg_CPS,
+         lower_99_CI = .lower,
+         upper_99_CI = .upper) %>%
+  write_csv(file = "prediction_avg_cps_interval_summary.csv")
+```
+
+
+Now to compare to observed 1/2 masses, the analytes of interest for interference, and the daily solution. All of these CPS must be averaged over 3 burns as well. 
+```{r summary_predict_X_2}
+df_hno3_avg <- df_hno3 %>%
+  group_by(description, day, mass, sample_order) %>%
+  mutate(description = "Ideal background") %>%
+  summarise(avg_cps = mean(cps), .groups = "drop") 
+
+#save(df_hno3_avg, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_hno3_avg.rda")
+
+df_hno3_avg
+```
+
+Create data frame of analyte m/z for averaged CPS.
+```{r subset_HNO3_data_4}
+df_analyte_avg <- df_cleaned %>%
+  filter(description %in% c("0.8% HNO3 A", "0.8% HNO3 B", "0.8% HNO3 C"),
+         mass %in% c(9, 27, 51, 52, 55, 59, 60, 63, 66, 75, 78, 98, 
+                     107, 111, 123, 137, 143, 145, 147, 149, 150, 
+                     155, 157, 205, 206, 232, 238)) %>%
+  group_by(description, day, mass, sample_order) %>%
+  mutate(description = "Analytes") %>%
+  summarise(avg_cps = mean(cps), .groups = "drop")
+
+#save(df_analyte_avg, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_analyte_avg.rda")
+
+df_analyte_avg
+```
+
+Create data frame of averaged CPS for daily solution m/z.
+```{r subset_HNO3_data_5}
+df_daily_avg <- df_cleaned %>%
+  filter(description %in% c("Daily Solution New Na with 100ppb Er 5% HCL"),
+         mass %in% c(51, 53, 75, 76, 77, 78, 156, 157, 248, 249)) %>%
+  group_by(description, day, mass, sample_order) %>%
+  mutate(description = "Daily solution") %>%
+  summarise(avg_cps = mean(cps), .groups = "drop")
+
+#save(df_daily_avg, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_daily_avg.rda")
+
+df_daily_avg
+```
+
+Combine all three averaged observed datasets: Ideal Background (HNO3 0.8%, analyte solutions, and daily solutions)
+```{r combine_observed_averaged}
+df_observed_avg <- bind_rows(df_hno3_avg, df_analyte_avg, df_daily_avg) %>%
+  mutate(description = factor(description))
+
+#save(df_observed_avg, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_observed_avg.rda")
+
+df_observed_avg
+```
+
+Summarize the cps predictions (median, quantiles) by m/z.
+```{r summary_predict_X_5}
+pred_X_avg %>%
+  group_by(mass) %>%
+  median_qi(avg_CPS, .width = 0.99) %>%
+  select(mass, avg_CPS, .lower, .upper) %>%
+  rename(posterior_median = avg_CPS,
+         lower_99_CI = .lower,
+         upper_99_CI = .upper)
+```
+
+Plot the predictions.
+```{r plot_predict_X_6, fig.align = "center", fig.asp=0.75, fig.width=8}
+pred_X_avg %>%
+  ggplot(aes(x = mass, y = avg_CPS)) +
+  stat_lineribbon(.width = c(0.99, 0.75, 0.5)) + 
+  scale_fill_brewer(palette = "YlOrRd") +
+  ylab("Average CPS") +
+  xlab("Mass") +
+  ggtitle("Predicted average CPS (3 burn replicates) @ m/z \n in HNO3 0.8% (Ideal Background)") +
+  scale_y_continuous(minor_breaks = seq(0, 20, 1)) +
+  theme_pubr() +
+  theme(legend.position = "right", legend.direction = "vertical")
+```
+
+Plot the average predictions of CPS at m/z and the observed (average of 3 burns) data.
+```{r plot_predict_X_7, fig.align='center', fig.asp=0.75, fig.width=8}
+plot_ibg_obs <- 
+pred_X_avg %>%
+  ggplot(aes(x = mass, y = avg_CPS)) +
+  stat_lineribbon(.width = c(0.99, 0.75, 0.5), alpha = 1) + 
+  scale_fill_discrete_sequential(name = "Predicted response", palette = "Light Grays") +
+  geom_point(data = df_observed_avg, aes(x = mass, y = avg_cps, 
+                                         shape = description,
+                                         color = description)) +
+  ylab("CPS") +
+  xlab("Mass") +
+  ggtitle("Predicted average (3 burns) Ideal Background and observed average CPS @ m/z") +
+  theme_pubr() +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  scale_shape_manual(name = "Observed response", labels = c("Analyte mass", "0.8% HNO3 and 5% HCl", "Interference free mass"), values = c(8, 15, 1)) +
+  #scale_color_manual(name = "Observed response", labels = c("Analyte mass", "0.8% HNO3 and 5% HCl", "Interference free mass"), values = c("orange", "skyblue", "black")) +
+  scale_color_discrete_qualitative(name = "Observed response", labels = c("Analyte mass", "0.8% HNO3 and 5% HCl", "Interference free mass")
+                     , palette = "Dark 3") +
+  scale_y_continuous(limits = c(0, 40), minor_breaks = seq(0, 40, 5)) + 
+  theme(legend.position = "right", legend.box = "vertical")
+
+# ggsave only works in R console (i.e., copy + paste to save)
+#ggsave(filename = "predicted_and_observed_cps.tif",
+#       plot = plot_ibg_obs,
+#       device = "tiff",
+#       width = 210 / 25.4,
+#       height = 180 / 25.4,
+#       units = "in")
+
+plot_ibg_obs
+```
+
+" In figure 3 (the above figure), the on-mass response for all method analytes are graphed as pink stars. When these pink stars are found within the gray shaded region, it means the blank response is indistinguishable from the white noise levels of the instrument in that mass range. The contamination-limited analytes are those analytes where pink stars fall outside the gray shaded area. The practical mplication is that every end user could generate a model and figure like this and every analyte in the end user’s lab could be classified as noise limited or contamination limited. This classification helps the end user (and the software) to understand which analytes are likely to be poor performers when it comes to on-mass IDL and the recovery of the MRL-LFB spike." -- Wilson et al (unpublished technical guidance)
+
+# Session Information
+```{r session_info}
+sessionInfo()
+```
+
+# References
+
+
+

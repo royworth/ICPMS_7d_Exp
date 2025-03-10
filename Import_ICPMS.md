@@ -1,0 +1,229 @@
+Import data from 7-day experiment
+================
+Roy W. Martin
+2025-03-10
+
+Below is code used to import data from an Excel file containing ICP-MS
+observations from a USEPA/ORD/CESER (Center for Environmental Solutions
+and Emergency Response - Cincinnati) laboratory experiment conducted
+over 7 days to characterize noise-limited or Ideal Background-Instrument
+Detection Limit (IB-IDL) for its local instrumentation.The
+observation-level data were measured as counts per second (CPS) recorded
+at specified m/z for individual “burns” from samples of 3 different
+![HNO_3](https://latex.codecogs.com/png.image?%5Cdpi%7B110%7D&space;%5Cbg_white&space;HNO_3 "HNO_3")
+0.8% solutions. These original data were recorded to an MS Excel file,
+which was imported, modified, and organized into a data frame object
+within R for use in modeling in another script called “Import_ICPMS.Rmd”
+located at <https://github.com/r-w-martin/ICPMS_7d_Exp>.
+
+# 1 Import data
+
+Importing data from the main Excel spreadsheet provided by J. Creed
+USEPA/ORD/CESER.
+
+``` r
+# set path and import all sheets and relevant columns from excel
+path <- "./Seven Day individual replicates for Roy.xlsx"
+
+df_import <- path %>%
+  excel_sheets() %>%
+  set_names() %>%
+  map_df(~ read_excel(path = path, 
+                      sheet = .x,
+                      range = "A8:C220"),
+         .id = "sheet")
+
+# Remove NA column
+# Add a column for burn number
+# Rename columns with lower case headings
+# Convert cps to integer
+# Save original cps, but also multiply by 0.500 sec
+# Convert sheet names to sample names
+
+df_cleaned <- df_import %>%
+  select(sheet, Mass, CPS) %>%
+  mutate(burn = as.integer(substrRight(sheet, 1))) %>%
+  rename(mass = Mass,
+         cps = CPS) %>%
+  mutate(cps_orig = cps,
+         cps = as.integer(round(cps_orig)*0.5)) %>%
+  mutate(sample = str_sub(sheet, 1, 5)) %>%
+  mutate(day = case_match(sample,
+                          "4BW32" ~ 1,
+                          "4BW33" ~ 2,
+                          "4BW34" ~ 3,
+                          "4BW35" ~ 4,
+                          "4BW36" ~ 5,
+                          "4BW37" ~ 6,
+                          "4BW38" ~ 7)) %>%
+  mutate(sample_order = str_sub(sheet, 7, 8)) %>%
+  mutate(description = case_match(sample_order,
+                                  "01" ~ "0.8% HNO3 A",
+                                  "02" ~ "ISO Solution 1 with Th",
+                                  "03" ~ "ISO Solution 2",
+                                  "04" ~ "Daily Solution New Na with 100ppb Er 5% HCL",
+                                  "05" ~ "Multi Element",
+                                  "06" ~ "0.8% HNO3 B",
+                                  "07" ~ "0.4ppb Nd & Sm, 0.2ppb Gd, 50ppb Ce",
+                                  "08" ~ "0.75ppb Nd & Sm, 0.375ppb Gd, 50ppb Ce",
+                                  "09" ~ "1.25ppb Nd & Sm, 0.625ppb Gd, 50ppb Ce",
+                                  "10" ~ "2.25ppb Nd & Sm, 1.125ppb Gd, 50ppb Ce",
+                                  "11" ~ "3.75ppb Nd & Sm, 1.88ppb Gd, 50ppb Ce",
+                                  "12" ~ "7.5ppb Nd & Sm, 3.75ppb Gd, 50ppb Ce",
+                                  "13" ~ "15ppb Nd & Sm, 7.5ppb Gd, 50ppb Ce",
+                                  "14" ~ "30ppb Nd & Sm, 15ppb Gd, 50ppb Ce",
+                                  "15" ~ "0.8% HNO3 C",
+                                  "16" ~ "0.1ppb Multi Element",
+                                  "17" ~ "0.2ppb Multi Element",
+                                  "18" ~ "Multi Element"))
+
+save(df_cleaned, file = "C:/Users/rmartin/OneDrive - Environmental Protection Agency (EPA)/Documents/ICPMS_methods/ICPMS_7d_Expt/model_files/df_cleaned.rda")
+
+df_cleaned %>%
+  print(10)
+```
+
+Plot all data by mass and sample description on day 1:
+
+``` r
+load("./model_files/df_cleaned.rda")
+
+df_cleaned %>%
+  filter(day == 1) %>%
+  ggplot(aes(x = (cps + 0.1), y = factor(mass), color = description)) +
+  geom_point() +
+  scale_x_continuous(trans = "log10") +
+  theme_cleveland()
+```
+
+<img src="Import_ICPMS_files/figure-gfm/explore-1.png" style="display: block; margin: auto;" />
+
+Plot CPS @ m/z = 71.5 (Nd 2+), 75 (As), and 212 for each sample type.
+
+``` r
+df_cleaned %>%
+  filter(mass %in% c(71.5, 75, 212)) %>%
+  ggplot(aes(x = cps + 1, y = description, color = factor(mass), shape = factor(burn))) +
+  geom_point(alpha = 0.5) +
+  geom_jitter(height = 0.4) +
+  scale_x_continuous(trans = "log10") +
+  xlab("cps") +
+  ylab("Sample ID") +
+  theme_cleveland()
+```
+
+<img src="Import_ICPMS_files/figure-gfm/explore2-1.png" style="display: block; margin: auto;" />
+
+Plot CPS @ 9 m/z (Be) across days by burn replicate.
+
+``` r
+df_cleaned %>%
+  filter(mass %in% c(9)) %>%
+  ggplot(aes(x = description, y = cps + 1, color = factor(burn))) +
+  geom_point(alpha = 0.5) +
+  geom_jitter(width = 0.4) +
+  facet_wrap(~ day, ncol = 2) +
+  scale_y_continuous(trans = "log10") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("Sample ID") +
+  ylab("log(cps + 1)") +
+  theme_cleveland()
+```
+
+<img src="Import_ICPMS_files/figure-gfm/explore3-1.png" style="display: block; margin: auto;" />
+
+Plot CPS @ m/z = 212:231 in 0.8%
+![HNO_3](https://latex.codecogs.com/png.image?%5Cdpi%7B110%7D&space;%5Cbg_white&space;HNO_3 "HNO_3")
+blank solutions (samples A, B, C) by burn replicate.
+
+``` r
+df_cleaned %>%
+  filter(description %in% c("0.8% HNO3 A", "0.8% HNO3 B", "0.8% HNO3 C"),
+         mass %in% c(212:231)) %>%
+  ggplot(aes(x = mass, y = cps, color = factor(burn))) +
+  geom_point(alpha = 0.5) +
+  #geom_jitter(width = 0.25) +
+  facet_wrap(~ description) +
+  #scale_y_continuous(trans = "log10") +
+  xlab("mass") +
+  ylab("cps")
+```
+
+<img src="Import_ICPMS_files/figure-gfm/explore4-1.png" style="display: block; margin: auto;" />
+
+``` r
+df_cleaned %>%
+  filter(description == "Multi Element",
+         mass %in% c(212:231)) %>%
+  ggplot(aes(x = mass, y = cps+1, color = factor(burn))) +
+  geom_point(alpha = 0.5) +
+  #geom_jitter(width = 0.25) +
+  #facet_wrap(~ day) +
+  #scale_y_continuous(trans = "log10") +
+  xlab("mass") +
+  ylab("cps")
+```
+
+<img src="Import_ICPMS_files/figure-gfm/explore5-1.png" style="display: block; margin: auto;" />
+
+Plot CPS @ m/z for 1/2 mass targets relevant to ideal background and
+according to
+![HNO_3](https://latex.codecogs.com/png.image?%5Cdpi%7B110%7D&space;%5Cbg_white&space;HNO_3 "HNO_3")
+sample and burn replicate.
+
+``` r
+df_cleaned %>%
+  filter(description %in% c("0.8% HNO3 A", "0.8% HNO3 B", "0.8% HNO3 C"),
+         mass %in% c(6.5, 22.5, 23.5, 44.5, 58.5, 59.5, 62.5, 63.5, 65.5, 66.5, 69.5, 
+                     70.5, 71.5, 72.5, 73.5, 74.5, 76.5, 77.5, 78.5, 81.5, 83.5, 91.5,
+                     92.5, 99.5, 115.5, 120.5, 122.5, 139.5, 140.5, 141.5, 143.5, 144.5,
+                     146.5, 147.5, 148.5, 151.5, 152.5, 159.5, 160.5, 204.5, 205.5, 212:229,
+                     232.5)) %>%
+  ggplot(aes(x = mass, y = cps, color = factor(burn))) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  #geom_jitter(width = 1) +
+  facet_wrap(~ day + description, ncol = 3) +
+  #scale_y_continuous(trans = "log10") +
+  xlab("mass") +
+  ylab("cps")
+```
+
+    ## `geom_smooth()` using formula = 'y ~ x'
+
+<img src="Import_ICPMS_files/figure-gfm/explore6-1.png" style="display: block; margin: auto;" />
+
+Plot CPS @ m/z for 1/2 mass targets relevant to ideal background and
+according to
+![HNO_3](https://latex.codecogs.com/png.image?%5Cdpi%7B110%7D&space;%5Cbg_white&space;HNO_3 "HNO_3")
+sample for a single burn.
+
+``` r
+df_cleaned %>%
+  filter(description %in% c("0.8% HNO3 A", "0.8% HNO3 B", "0.8% HNO3 C"),
+         mass %in% c(6.5, 22.5, 23.5, 44.5, 58.5, 59.5, 62.5, 63.5, 65.5, 66.5, 69.5, 
+                     70.5, 71.5, 72.5, 73.5, 74.5, 76.5, 77.5, 78.5, 81.5, 83.5, 91.5,
+                     92.5, 99.5, 115.5, 120.5, 122.5, 139.5, 140.5, 141.5, 143.5, 144.5,
+                     146.5, 147.5, 148.5, 151.5, 152.5, 159.5, 160.5, 204.5, 205.5, 212:229,
+                     232.5),
+         burn == 1) %>%
+  ggplot(aes(x = mass, y = log(cps + 1), color = factor(burn))) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  #geom_jitter(width = 1) +
+  facet_wrap(~ day + description, ncol = 3) +
+  #scale_y_continuous(trans = "log10") +
+  xlab("mass") +
+  ylab("cps")
+```
+
+    ## `geom_smooth()` using formula = 'y ~ x'
+
+<img src="Import_ICPMS_files/figure-gfm/explore7-1.png" style="display: block; margin: auto;" />
+
+Export csv file .
+
+``` r
+df_cleaned %>%
+  write_csv(file = "Individual_burn_data.csv")
+```
